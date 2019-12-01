@@ -26,7 +26,7 @@ def _subproc_eva(params, eva, gpuq,net_pool):
 	ngpu = gpuq.get()
 	start_time = time.time()
 
-	item, rd, nn_id, pl_len, spl_id, bt_nm, blk_wnr, ft_sign = params
+	item, rd, nn_id, pl_len, spl_id, bt_nm, blk_wnr, ft_sign,net= params
 	# return score and pos
 	if MAIN_CONFIG['eva_debug']:
 		score = random.uniform(0, 0.1)
