@@ -12,34 +12,96 @@ def list_swap(ls, i, j):
     cpy = ls[i]
     ls[i] = ls[j]
     ls[j] = cpy
-    
+
+
+class DataSize:
+    def __init__(self, eva):
+        self.eva = eva
+        self.round_count = 0
+        self.mode = NAS_CONFIG['nas_main']['add_data_mode']
+        #  data size control for game
+        self.add_data_per_rd = NAS_CONFIG['nas_main']['add_data_per_round']
+        self.init_lr = NAS_CONFIG['nas_main']['init_data_size']
+        self.scale = NAS_CONFIG['nas_main']['data_increase_scale']
+        #  data size control for confirm train
+        self.data_for_confirm_train = NAS_CONFIG['nas_main']['add_data_for_confirm_train']
+
+    def _game_data_ctrl(self):
+        if self.mode == "linear":
+            self.round_count += 1
+            self.eva.set_data_size(self.round_count * self.add_data_per_rd)
+        elif self.mode == "scale":
+            dsize = int(self.init_lr * (self.scale ** self.round_count))
+            self.eva.set_data_size(dsize)
+            self.round_count += 1
+        else:
+            raise ValueError("signal error: mode, it must be one of linear, scale")
+
+    def control(self, stage="game"):
+        """Increase the dataset's size in different way
+
+        :param stage: must be one of "game", "confirm"
+        :return:
+        """
+        if stage == "game":
+            self._game_data_ctrl()
+        elif stage == "confirm":
+            self.eva.set_data_size(self.data_for_confirm_train)
+        else:
+            raise ValueError("signal error: stage, it must be one of game, confirm")
+
+
+def _epoch_ctrl(eva=None, stage="game"):
+    """
+
+    :param eva:
+    :param stage: must be one of "game", "confirm", "retrain"
+    :return:
+    """
+    if stage == "game":
+        eva.set_epoch(NAS_CONFIG['eva']['search_epoch'])
+    elif stage == "confirm":
+        eva.set_epoch(NAS_CONFIG['eva']['confirm_epoch'])
+    elif stage == "retrain":
+        eva.set_epoch(NAS_CONFIG['eva']['retrain_epoch'])
+    else:
+        raise ValueError("signal error: stage, it must be one of game, confirm, retrain")
+
 
 class Communication:
     def __init__(self):
         self.task = queue.Queue()
         self.result = queue.Queue()
         self.idle_gpuq = multiprocessing.Manager().Queue()
+        self.net_pool=""
+        self.tables=[]
+        self.tw_count=NAS_CONFIG['nas_main']['num_opt_best']-NAS_CONFIG['nas_main']['num_gpu']
         for gpu in range(NAS_CONFIG['nas_main']['num_gpu']):
             self.idle_gpuq.put(gpu)
     def wake_up_train_winner(self,res):
         print("train_winner wake up")
-        score, time_cost, nn_id, spl_id ,net_pool=res
-        print("nn_id spl_id item_list_length",nn_id,spl_id,len(net_pool[nn_id -1].item_list))
-        if spl_id<=NAS_CONFIG['nas_main']['num_gpu']:
-            net_pool[nn_id - 1].item_list[-spl_id].score = score
-            net_pool[nn_id - 1].spl.update_opt_model(net_pool[nn_id -1].item_list[-spl_id].code, -net_pool[nn_id -1].item_list[-spl_id].score)
-        else:
-            net_pool[nn_id - 1].item_list[spl_id-1].score = score
-            net_pool[nn_id - 1].spl.update_opt_model(net_pool[nn_id -1].item_list[spl_id-1].code, -net_pool[nn_id - 1].item_list[spl_id-1].score)
-        item_id=len(net_pool[nn_id -1].item_list)+1
-        cell, graph, table = net_pool[nn_id-1].spl.sample()
-        net_pool[nn_id -1].item_list.append(NetworkItem(item_id, graph, cell, table))
-        item=net_pool[nn_id -1].item_list[-1]
-        task_param = [
-            item, 2, nn_id, 1, item_id, item_id, True, True
-        ]
-        print("train winner new task put")
-        self.task.put(task_param)
+        score, time_cost, nn_id, spl_id =res
+        print("nn_id spl_id item_list_length",nn_id,spl_id,len(self.net_pool[nn_id -1].item_list))
+        self.net_pool[nn_id - 1].item_list[spl_id-1].score = score
+        self.net_pool[nn_id - 1].spl.update_opt_model(self.net_pool[nn_id -1].item_list[spl_id-1].code, -self.net_pool[nn_id - 1].item_list[spl_id-1].score)
+        item_id=len(self.net_pool[nn_id -1].item_list)+1
+        cnt=0
+        while cnt<500:
+            cell, graph, table = self.net_pool[nn_id-1].spl.sample();
+            if table not in self.tables:
+                self.tables.append(table)
+                print("sample success",cnt)
+                break;
+            cnt+=1
+        if self.tw_count>0:
+            self.net_pool[nn_id -1].item_list.append(NetworkItem(item_id, graph, cell, table))
+            item=self.net_pool[nn_id -1].item_list[-1]
+            task_param = [
+                item,self.net_pool[nn_id -1].pre_block,3, nn_id, 1, item_id, item_id, True, True
+            ]
+            print("train winner new task put")
+            self.task.put(task_param)
+        self.tw_count-=1
 
 class Logger(object):
     def __init__(self):
